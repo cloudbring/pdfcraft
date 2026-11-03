@@ -11,11 +11,11 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+craft-pdf.workspace = true
 fax.workspace = true
 # CCITT fax and JBIG2 decoding (`decode_ccitt`, `decode_jbig2`); already in the tree through hayro.
 hayro-ccitt.workspace = true
 hayro-jbig2.workspace = true
-flate2.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

@@ -118,8 +118,8 @@ milestone = "M1"
 status = "shipped"
 commands = []
 tools = []
-evidence = ["crates/filters/src/lib.rs::chain_three_filters_with_predictor", "crates/filters/src/lzw.rs::spec_example", "crates/filters/src/predictor.rs::png_hand_vectors", "crates/filters/src/lib.rs::raw_flate_fallback_preserves_output_limits", "crates/cos/src/object.rs::raw_flate_fallback_streams_preserve_the_caller_limit"]
-notes = "Raw-deflate fallback preserves output limits in strict and tolerant decoding, including misleading zlib headers. Image codecs remain outside this general-purpose filter implementation."
+evidence = ["crates/filters/src/lib.rs::chain_three_filters_with_predictor", "crates/filters/tests/codec_compat.rs::lzw_spec_vector_and_weezl_cross_check", "crates/filters/tests/codec_compat.rs::partial_png_optimum_matches_legacy_encoded_bytes", "crates/filters/src/lib.rs::raw_flate_fallback_preserves_output_limits", "crates/cos/src/object.rs::raw_flate_fallback_streams_preserve_the_caller_limit"]
+notes = "General-purpose codecs use craft-pdf's bounded FilterChain; pdfcraft keeps compatibility for partial predictor rows and malformed framing. Raw-deflate fallback preserves output limits in strict and tolerant decoding, including misleading zlib headers. Image codecs remain outside this general-purpose filter implementation."
 
 [[feature]]
 id = "core.image-filters"
@@ -142,7 +142,7 @@ milestone = "M1"
 status = "shipped"
 commands = []
 tools = []
-evidence = ["crates/filters/src/flate.rs::bomb_is_bounded", "crates/filters/src/lib.rs::limit_applies_to_intermediate_buffers"]
+evidence = ["crates/filters/src/lib.rs::bomb_output_boundaries_are_unchanged", "crates/filters/src/lib.rs::limit_applies_to_intermediate_buffers"]
 notes = ""
 
 [[feature]]

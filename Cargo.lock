@@ -1176,6 +1176,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "craft-archive"
+version = "0.1.0"
+source = "git+https://github.com/cloudbring/craft-libs?branch=algo%2Fintegration#91e0328f63f027086214472d48cfb4909d95a2a6"
+dependencies = [
+ "flate2",
+ "thiserror 2.0.21",
+ "zip",
+]
+
+[[package]]
 name = "craft-docpath"
 version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=787a7a0f972fd1d7a7618fdbeca3a5267a0407ff#787a7a0f972fd1d7a7618fdbeca3a5267a0407ff"
@@ -1229,6 +1239,16 @@ dependencies = [
  "muda",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
+]
+
+[[package]]
+name = "craft-pdf"
+version = "0.1.0"
+source = "git+https://github.com/cloudbring/craft-libs?branch=algo%2Fintegration#91e0328f63f027086214472d48cfb4909d95a2a6"
+dependencies = [
+ "craft-archive",
+ "flate2",
+ "weezl 0.1.12",
 ]
 
 [[package]]
@@ -4435,8 +4455,8 @@ dependencies = [
 name = "pdfcraft-filters"
 version = "0.18.0"
 dependencies = [
+ "craft-pdf",
  "fax",
- "flate2",
  "hayro-ccitt",
  "hayro-jbig2",
  "proptest",

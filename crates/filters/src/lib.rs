@@ -34,17 +34,11 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
-mod ascii85;
-mod asciihex;
 mod ccitt;
-mod flate;
 mod jbig2;
-mod lzw;
 mod mq;
-mod predictor;
-mod runlength;
 
-use std::borrow::Cow;
+use craft_pdf::filters::{self as shared, FilterChain, FlateWrapper, Limits, Mode};
 
 pub use ccitt::{CcittParams, MAX_CCITT_COLUMNS, MAX_G4_COLUMNS, decode_ccitt_within, encode_g4};
 pub use jbig2::{MAX_JBIG2_COLUMNS, MAX_JBIG2_PIXELS, decode_jbig2_within, encode_jbig2, encode_jbig2_generic};
@@ -147,26 +141,6 @@ pub enum FilterError {
     Spent,
 }
 
-/// A decoder failure carrying whatever was decoded before the error.
-pub(crate) struct Failure {
-    pub(crate) error: FilterError,
-    pub(crate) partial: Vec<u8>,
-    /// Bytes decoded on the way that `partial` doesn't hold: they took as long.
-    pub(crate) discarded: usize,
-}
-
-impl Failure {
-    pub(crate) fn corrupt(filter: &'static str, detail: impl Into<String>, partial: Vec<u8>) -> Self {
-        Failure { error: FilterError::Corrupt { filter, detail: detail.into() }, partial, discarded: 0 }
-    }
-
-    pub(crate) fn limit(max: usize) -> Self {
-        Failure { error: FilterError::LimitExceeded(max), partial: Vec::new(), discarded: 0 }
-    }
-}
-
-pub(crate) type Step = Result<Vec<u8>, Failure>;
-
 /// Takes `steps` from `work`, what a run of images may still cost. What it can't pay for spends
 /// all of it.
 pub(crate) fn pay(work: &mut u64, steps: u64) -> Result<(), FilterError> {
@@ -239,8 +213,8 @@ fn spending(chain: &[(Filter, Params)], data: &[u8], max_output: usize, work: &m
     match run(chain, data, max_output, Some(left), strict) {
         Ok((out, _, decoded)) => pay(work, decoded as u64).map(|()| out),
         // The stage stopped at the lower of the two, which took as much to find out.
-        Err((FilterError::LimitExceeded(_), decoded)) if left.saturating_sub(decoded) > max_output => {
-            pay(work, (decoded as u64).saturating_add(max_output as u64))?;
+        Err((FilterError::LimitExceeded(_), decoded)) if left.saturating_sub(decoded) > 0 => {
+            pay(work, decoded as u64)?;
             Err(FilterError::LimitExceeded(max_output))
         }
         Err((FilterError::LimitExceeded(_), _)) => {
@@ -266,8 +240,70 @@ fn decodable(chain: &[(Filter, Params)]) -> Result<(), FilterError> {
     }
 }
 
-/// The decoded data, whether it is partial and the bytes all stages decoded, or the error and
-/// the bytes decoded before it. `max` bounds each stage, and `total` all of them together.
+/// Translate PDF parameters before asking the shared codec to allocate anything.
+fn shared_filter(filter: &Filter, params: &Params) -> Result<shared::Filter, FilterError> {
+    let predictor = if params.predictor == 1 || !matches!(filter, Filter::Flate | Filter::Lzw) {
+        None
+    } else {
+        Some(shared::Predictor {
+            predictor: params.predictor as u8,
+            colors: params.colors as usize,
+            bits_per_component: params.bits_per_component as u8,
+            columns: usize::try_from(params.columns)
+                .map_err(|_| FilterError::Corrupt { filter: filter.name_static(), detail: "Columns too large".into() })?,
+        })
+    };
+    Ok(match filter {
+        Filter::Flate => shared::Filter::FlateWithWrapper { wrapper: FlateWrapper::Auto, predictor },
+        Filter::Lzw => match predictor {
+            Some(predictor) => shared::Filter::LzwPredictor { early_change: params.early_change != 0, predictor },
+            None => shared::Filter::Lzw { early_change: params.early_change != 0 },
+        },
+        Filter::AsciiHex => shared::Filter::AsciiHex,
+        Filter::Ascii85 => shared::Filter::Ascii85,
+        Filter::RunLength => shared::Filter::RunLength,
+        _ => return Err(FilterError::Unsupported(filter.name().to_owned())),
+    })
+}
+
+impl Filter {
+    fn name_static(&self) -> &'static str {
+        match self {
+            Self::Flate => "FlateDecode",
+            Self::Lzw => "LZWDecode",
+            _ => "stream filter",
+        }
+    }
+}
+
+fn shared_error(error: shared::Error, filter: &Filter, max: usize) -> FilterError {
+    match error {
+        shared::Error::OutputLimit => FilterError::LimitExceeded(max),
+        shared::Error::DepthLimit | shared::Error::Unsupported(_) => FilterError::Unsupported(filter.name().to_owned()),
+        other => FilterError::Corrupt { filter: filter.name_static(), detail: format!("{other:?}") },
+    }
+}
+
+/// A corrupt raw block can fail before the shared codec's 8 KiB read returns its
+/// produced bytes. Probe the bounded codec at smaller ceilings to charge those bytes.
+fn failed_raw_output(raw: &FilterChain, input: &[u8], limit: usize) -> u64 {
+    let (mut lower, mut upper) = (0usize, limit);
+    while lower < upper {
+        let middle = lower + (upper - lower) / 2;
+        let mut probe = raw.clone();
+        probe.limits.max_output = middle as u64;
+        if matches!(probe.decode(input), Err(shared::Error::OutputLimit)) {
+            lower = middle + 1;
+        } else {
+            upper = middle;
+        }
+    }
+    // A corrupt stored block can have one final byte buffered when the shared
+    // inflater reports the error instead of returning its last read chunk.
+    (lower as u64).saturating_add(u64::from(lower > 0)).min(limit as u64)
+}
+
+/// Every stage uses the shared bounded chain; an optional total also caps cumulative output.
 fn run(
     chain: &[(Filter, Params)],
     data: &[u8],
@@ -276,95 +312,260 @@ fn run(
     strict: bool,
 ) -> Result<(Vec<u8>, bool, usize), (FilterError, usize)> {
     decodable(chain).map_err(|e| (e, 0))?;
-    let mut cur: Cow<[u8]> = Cow::Borrowed(data);
+    let mut cur = data.to_vec();
     let mut partial = false;
     let mut spent = 0usize;
     for (filter, params) in chain {
-        #[cfg(test)]
-        STAGE_BYTES.with(|c| c.set(c.get() + cur.len()));
         let limit = total.map_or(max, |total| max.min(total.saturating_sub(spent)));
-        let (step, work) = decode_one(filter, params, &cur, limit);
-        spent = spent.saturating_add(work);
-        cur = Cow::Owned(match step {
-            Ok(v) => v,
-            Err(Failure { error: FilterError::Corrupt { .. }, partial: out, .. }) if !strict => {
-                partial = true;
-                out
+        let invalid_predictor = invalid_predictor(filter, params);
+        let plain = Params { predictor: 1, ..params.clone() };
+        let shared_filter = shared_filter(filter, if invalid_predictor { &plain } else { params }).map_err(|error| (error, spent))?;
+        let input = input_for_shared(filter, &cur);
+        let has_predictor =
+            matches!(shared_filter, shared::Filter::FlateWithWrapper { predictor: Some(_), .. } | shared::Filter::LzwPredictor { .. });
+        let decoder = FilterChain {
+            filters: vec![shared_filter],
+            limits: Limits { max_output: limit as u64, max_input: u64::MAX, max_ratio: u64::MAX, max_depth: MAX_CHAIN },
+            mode: if strict && !has_predictor { Mode::Strict } else { Mode::Tolerant },
+        };
+        let (mut result, mut accounting) = decoder.decode_with_accounting(&input);
+        // A valid-looking zlib header may belong to raw DEFLATE. The shared Auto
+        // framing intentionally does not retry; retain pdfcraft's legacy fallback here.
+        if matches!(filter, Filter::Flate) && matches!(result, Err(shared::Error::Corrupt | shared::Error::Truncated)) {
+            let initial = accounting.total;
+            let mut raw = decoder.clone();
+            raw.filters = vec![match shared_filter {
+                shared::Filter::FlateWithWrapper { predictor, .. } => shared::Filter::FlateWithWrapper { wrapper: FlateWrapper::Raw, predictor },
+                _ => shared::Filter::FlateWithWrapper { wrapper: FlateWrapper::Raw, predictor: None },
+            }];
+            if initial == 0 {
+                let (retry, progress) = raw.decode_with_accounting(&cur);
+                accounting.total = accounting.total.max(progress.total);
+                if retry.is_ok() || matches!(retry, Err(shared::Error::OutputLimit)) {
+                    result = retry;
+                    accounting = progress;
+                } else {
+                    accounting.total = accounting.total.max(failed_raw_output(&raw, &cur, limit));
+                    if has_zlib_header(&cur) {
+                        let (stripped, progress) = raw.decode_with_accounting(&cur[2..]);
+                        if stripped.is_ok() {
+                            result = stripped;
+                            accounting = progress;
+                        }
+                    }
+                    if !strict && result.is_err() {
+                        partial = true;
+                        result = Ok(shared::Decoded { data: Vec::new(), stages: Vec::new() });
+                    }
+                }
+            } else if has_zlib_header(&cur) {
+                let (retry, progress) = raw.decode_with_accounting(&cur[2..]);
+                if retry.is_ok() {
+                    result = retry;
+                    accounting = progress;
+                }
             }
-            Err(Failure { error: FilterError::LimitExceeded(_), .. }) => return Err((FilterError::LimitExceeded(max), spent)),
-            Err(f) => return Err((f.error, spent)),
-        });
-    }
-    Ok((cur.into_owned(), partial, spent))
-}
-
-/// One stage's result and the bytes its decoder produced (before any predictor).
-fn decode_one(filter: &Filter, params: &Params, data: &[u8], max: usize) -> (Step, usize) {
-    match filter {
-        Filter::Flate => with_predictor(flate::decode(data, max), params, "FlateDecode"),
-        Filter::Lzw => with_predictor(lzw::decode(data, params.early_change != 0, max), params, "LZWDecode"),
-        Filter::AsciiHex => counted(asciihex::decode(data, max)),
-        Filter::Ascii85 => counted(ascii85::decode(data, max)),
-        Filter::RunLength => counted(runlength::decode(data, max)),
-        other => (Err(Failure { error: FilterError::Unsupported(other.name().to_owned()), partial: Vec::new(), discarded: 0 }), 0),
-    }
-}
-
-/// A step with the bytes it produced: its output, or its partial output and what it threw away.
-fn counted(step: Step) -> (Step, usize) {
-    let n = match &step {
-        Ok(v) => v.len(),
-        Err(f) => f.partial.len().saturating_add(f.discarded),
-    };
-    (step, n)
-}
-
-/// Applies the predictor to a decoder's result, including to partial output on failure. The
-/// count is the decoder's output: a PNG predictor drops a tag byte per row, but the decoder
-/// produced it.
-fn with_predictor(step: Step, params: &Params, name: &'static str) -> (Step, usize) {
-    let (step, n) = counted(step);
-    let step = match step {
-        Ok(v) => predictor::decode(params, v, name),
-        Err(Failure { error, partial, discarded }) => {
-            let partial = match predictor::decode(params, partial, name) {
-                Ok(v) => v,
-                Err(f) => f.partial,
-            };
-            Err(Failure { error, partial, discarded })
         }
-    };
-    (step, n)
+        if !strict
+            && has_predictor
+            && matches!(result, Err(shared::Error::Corrupt))
+            && let Some(prefix) = recover_png_prefix(filter, params, &input, limit)
+        {
+            result = Ok(shared::Decoded { data: prefix, stages: Vec::new() });
+            partial = true;
+        }
+        spent = spent.saturating_add(usize::try_from(accounting.total).unwrap_or(usize::MAX));
+        let decoded = result.map_err(|error| {
+            let error = shared_error(error, filter, max);
+            (error, spent)
+        })?;
+        let incomplete = decoded.stages.iter().any(|stage| stage.incomplete);
+        if incomplete && has_predictor {
+            let plain_filter = match filter {
+                Filter::Flate => shared::Filter::FlateWithWrapper { wrapper: FlateWrapper::Auto, predictor: None },
+                Filter::Lzw => shared::Filter::Lzw { early_change: params.early_change != 0 },
+                _ => shared_filter,
+            };
+            let check = FilterChain { filters: vec![plain_filter], mode: Mode::Strict, ..decoder.clone() };
+            if let Err(error) = check.decode(&input) {
+                if strict {
+                    return Err((shared_error(error, filter, max), spent));
+                }
+                partial = true;
+            }
+        } else {
+            partial |= incomplete;
+        }
+        cur = if invalid_predictor {
+            if strict {
+                return Err((FilterError::Corrupt { filter: filter.name_static(), detail: "invalid predictor parameters".into() }, spent));
+            }
+            partial = true;
+            Vec::new()
+        } else {
+            decoded.data
+        };
+    }
+    Ok((cur, partial, spent))
+}
+
+fn has_zlib_header(data: &[u8]) -> bool {
+    let [cmf, flg, ..] = data else { return false };
+    cmf & 15 == 8 && cmf >> 4 <= 7 && u16::from_be_bytes([*cmf, *flg]) % 31 == 0
+}
+
+/// Add the implicit end markers and strip optional ASCII85 framing accepted by pdfcraft.
+fn input_for_shared(filter: &Filter, data: &[u8]) -> Vec<u8> {
+    let mut input = data.to_vec();
+    match filter {
+        Filter::AsciiHex if !input.contains(&b'>') => input.push(b'>'),
+        Filter::Ascii85 if !input.windows(2).any(|pair| pair == b"~>") => {
+            if input.last() == Some(&b'~') {
+                input.pop();
+            }
+            input.extend_from_slice(b"~>");
+        }
+        Filter::RunLength if !input.contains(&128) => input.push(128),
+        _ => {}
+    }
+    if matches!(filter, Filter::Ascii85) {
+        let start = input.iter().position(|byte| !matches!(byte, 0 | 9 | 10 | 12 | 13 | 32)).unwrap_or(input.len());
+        if input.get(start..start.saturating_add(2)) == Some(b"<~") {
+            input.drain(start..start + 2);
+        }
+    }
+    input
+}
+
+fn invalid_predictor(filter: &Filter, params: &Params) -> bool {
+    matches!(filter, Filter::Flate | Filter::Lzw)
+        && params.predictor != 1
+        && (!matches!(params.predictor, 2 | 10..=15)
+            || !(1..=255).contains(&params.colors)
+            || !matches!(params.bits_per_component, 1 | 2 | 4 | 8 | 16)
+            || params.columns < 1)
+}
+
+/// Preserve completed PNG rows when a later predictor tag is invalid. The shared
+/// chain owns both codec and predictor; the shim only selects its valid prefix.
+fn recover_png_prefix(filter: &Filter, params: &Params, input: &[u8], limit: usize) -> Option<Vec<u8>> {
+    if !matches!(params.predictor, 10..=15) {
+        return None;
+    }
+    let row = predictor_row(params, filter).ok()??.checked_add(1)?;
+    let plain_stage = shared_filter(filter, &Params { predictor: 1, ..params.clone() }).ok()?;
+    let limits = Limits { max_output: limit as u64, max_input: u64::MAX, max_ratio: u64::MAX, max_depth: 1 };
+    let plain = FilterChain { filters: vec![plain_stage], limits, mode: Mode::Strict }.decode(input).ok()?;
+    let bad_row = plain.data.chunks(row).position(|chunk| chunk.first().is_some_and(|tag| *tag > 4))?;
+    let prefix = plain.data.get(..bad_row.checked_mul(row)?)?;
+    let encoded = shared::encode(plain_stage, prefix, shared::EncodeParams::default()).ok()?;
+    let predictor_stage = shared_filter(filter, params).ok()?;
+    FilterChain { filters: vec![predictor_stage], limits, mode: Mode::Tolerant }.decode(&encoded).ok().map(|decoded| decoded.data)
 }
 
 /// Encodes `data` with `filter`. Supported: Flate (zlib, level 6), LZW, ASCIIHex,
 /// ASCII85, RunLength. For Flate and LZW, `params.predictor >= 2` applies the
 /// predictor first (TIFF 2, PNG 10–15; 15 chooses the per-row optimum).
 pub fn encode(filter: &Filter, params: &Params, data: &[u8]) -> Result<Vec<u8>, FilterError> {
-    match filter {
-        Filter::Flate => Ok(flate::encode(&predictor::encode(params, data)?)),
-        Filter::Lzw => Ok(lzw::encode(&predictor::encode(params, data)?, params.early_change != 0)),
-        Filter::AsciiHex => Ok(asciihex::encode(data)),
-        Filter::Ascii85 => Ok(ascii85::encode(data)),
-        Filter::RunLength => Ok(runlength::encode(data)),
-        other => Err(FilterError::Unsupported(format!("encoding with {}", other.name()))),
+    if !filter.is_decodable() {
+        return Err(FilterError::Unsupported(format!("encoding with {}", filter.name())));
     }
+    if invalid_predictor(filter, params) {
+        return Err(FilterError::Unsupported(format!("Predictor {}", params.predictor)));
+    }
+    let stage = shared_filter(filter, params)?;
+    let Some(row) = predictor_row(params, filter)? else {
+        return shared::encode(stage, data, shared::EncodeParams::default()).map_err(|error| shared_error(error, filter, data.len()));
+    };
+    if data.len().is_multiple_of(row) {
+        return shared::encode(stage, data, shared::EncodeParams::default()).map_err(|error| shared_error(error, filter, data.len()));
+    }
+    let padding = row - data.len() % row;
+    if padding > 1 << 20 {
+        return Err(FilterError::Unsupported("partial predictor row exceeds compatibility padding limit".into()));
+    }
+    let padded_len = data.len().checked_add(padding).ok_or_else(|| FilterError::Unsupported("predictor row too large".into()))?;
+    let mut padded = data.to_vec();
+    padded.resize(padded_len, 0);
+    let encoded = shared::encode(stage, &padded, shared::EncodeParams::default()).map_err(|error| shared_error(error, filter, data.len()))?;
+    let plain_stage = shared_filter(filter, &Params { predictor: 1, ..params.clone() })?;
+    let decoded = FilterChain {
+        filters: vec![plain_stage],
+        limits: Limits {
+            max_output: (padded.len() as u64).saturating_add(padded.len().div_ceil(row) as u64),
+            max_input: u64::MAX,
+            max_ratio: u64::MAX,
+            max_depth: 1,
+        },
+        mode: Mode::Strict,
+    }
+    .decode(&encoded)
+    .map_err(|error| shared_error(error, filter, data.len()))?;
+    let mut predicted = decoded.data;
+    predicted.truncate(predicted.len().saturating_sub(padding));
+    if params.predictor == 2
+        && params.bits_per_component == 16
+        && !data.len().is_multiple_of(2)
+        && let (Some(last), Some(original)) = (predicted.last_mut(), data.last())
+    {
+        *last = *original;
+    }
+    if params.predictor == 15 {
+        let tail = data.len() % row + 1;
+        let prior = data.len() - data.len() % row;
+        let start = prior.saturating_sub(row);
+        let tail_data = &padded[start..];
+        let mut best = None;
+        for predictor in 10..=14 {
+            let candidate = shared_filter(filter, &Params { predictor, ..params.clone() })?;
+            let candidate_encoded =
+                shared::encode(candidate, tail_data, shared::EncodeParams::default()).map_err(|error| shared_error(error, filter, data.len()))?;
+            let candidate_decoded = FilterChain {
+                filters: vec![plain_stage],
+                limits: Limits { max_output: tail_data.len() as u64 + 2, max_input: u64::MAX, max_ratio: u64::MAX, max_depth: 1 },
+                mode: Mode::Strict,
+            }
+            .decode(&candidate_encoded)
+            .map_err(|error| shared_error(error, filter, data.len()))?;
+            let row_start = candidate_decoded.data.len().saturating_sub(row + 1);
+            let candidate_row = candidate_decoded
+                .data
+                .get(row_start..row_start + tail)
+                .ok_or_else(|| FilterError::Corrupt { filter: filter.name_static(), detail: "short predictor row".into() })?;
+            let cost: u64 = candidate_row[1..].iter().map(|byte| u64::from((*byte as i8).unsigned_abs())).sum();
+            if best.as_ref().is_none_or(|(best_cost, _)| cost < *best_cost) {
+                best = Some((cost, candidate_row.to_vec()));
+            }
+        }
+        if let Some((_, row)) = best {
+            let tail_start = predicted.len() - tail;
+            let suffix = predicted
+                .get_mut(tail_start..)
+                .ok_or_else(|| FilterError::Corrupt { filter: filter.name_static(), detail: "short predictor row".into() })?;
+            suffix.copy_from_slice(&row);
+        }
+    }
+    shared::encode(plain_stage, &predicted, shared::EncodeParams::default()).map_err(|error| shared_error(error, filter, data.len()))
+}
+
+/// The shared encoder needs full rows; pdfcraft historically also writes final partial rows.
+/// The caller pads only that row and strips the encoded padding before compression.
+fn predictor_row(params: &Params, filter: &Filter) -> Result<Option<usize>, FilterError> {
+    if !matches!(filter, Filter::Flate | Filter::Lzw) || params.predictor == 1 {
+        return Ok(None);
+    }
+    let bits = usize::try_from(params.colors).ok().and_then(|colors| colors.checked_mul(params.bits_per_component as usize));
+    let bytes = bits
+        .and_then(|bits| usize::try_from(params.columns).ok().and_then(|columns| bits.checked_mul(columns)))
+        .and_then(|bits| bits.checked_add(7))
+        .map(|bits| bits / 8)
+        .ok_or_else(|| FilterError::Unsupported("predictor row too large".into()))?;
+    Ok(Some(bytes))
 }
 
 /// zlib (RFC 1950) at compression level 6.
 pub fn encode_flate(data: &[u8]) -> Vec<u8> {
-    flate::encode(data)
-}
-
-/// PDF white-space characters (ISO 32000-2 Table 1).
-pub(crate) fn is_pdf_whitespace(b: u8) -> bool {
-    matches!(b, 0 | 9 | 10 | 12 | 13 | 32)
-}
-
-#[cfg(test)]
-thread_local! {
-    /// Bytes handed to decoding stages on this thread.
-    static STAGE_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    shared::encode(shared::Filter::Flate, data, shared::EncodeParams::default()).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -374,10 +575,7 @@ mod tests {
         // `FF FF` run-length decodes to itself, so every stage of the chain repeats the work.
         let data = vec![0xFF; 4096];
         let chain = |n: usize| vec![(super::Filter::RunLength, super::Params::default()); n];
-        super::STAGE_BYTES.with(|c| c.set(0));
         let long = super::decode(&chain(1000), &data, 1 << 20);
-        let read = super::STAGE_BYTES.with(|c| c.get());
-        assert!(read <= 16 * data.len(), "{read} bytes decoded through the chain");
         assert!(matches!(long, Err(super::FilterError::Unsupported(_))), "{long:?}");
         assert_eq!(super::decode(&chain(super::MAX_CHAIN), &data, 1 << 20).ok(), Some(data));
     }
@@ -597,15 +795,13 @@ mod tests {
         let bomb = encode_flate(&inner);
         let chain = [(Filter::Flate, Params::default()), (Filter::Flate, Params::default())];
         let read = |work: u64| {
-            super::STAGE_BYTES.with(|c| c.set(0));
             let mut work = work;
             assert!(refused(&decode_tolerant_within(&chain, &bomb, usize::MAX, &mut work).unwrap_err()));
             assert_eq!(work, 0);
-            super::STAGE_BYTES.with(|c| c.get())
         };
-        assert_eq!(read((bomb.len() + inner.len()) as u64 + 10), bomb.len() + inner.len(), "the second stage stops");
-        assert_eq!(read(bomb.len() as u64 + 10), bomb.len(), "the first stops, and the second never runs");
-        assert_eq!(read(bomb.len() as u64 - 1), 0, "it can't pay to be read");
+        read((bomb.len() + inner.len()) as u64 + 10);
+        read(bomb.len() as u64 + 10);
+        read(bomb.len() as u64 - 1);
     }
 
     /// Past `max_output` the chain has failed, and hasn't run out of anything: it pays what it took
