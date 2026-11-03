@@ -11,4 +11,8 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+craft-archive.workspace = true
+
+[dev-dependencies]
 flate2.workspace = true
+zip = { version = "9", default-features = false, features = ["deflate"] }
