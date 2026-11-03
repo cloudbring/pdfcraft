@@ -827,3 +827,5 @@ PR #2133 retains document-local Pages sidebar focus for Ctrl/Cmd+A and Escape af
 PR #1952 retains per-widget checkbox/radio export-value editing in the split form-authoring and Prepare modules. Caption editing remains supported. Tests cover preserved appearances and selection, invalid/locked refusals, data-format round trips, and Apply/Cancel/Undo. Current-head hosted validation is pending; feature estimates are unchanged.
 
 - **2026-10-31 (#1577):** Reconciled the page-shadow preference with split viewer, organizer, settings and control modules, preserving upstream page-gap shadow suppression. CI validation pending.
+
+- **2026-11-03 (#55):** `cos` streams incremental saves (`write_incremental_to`, `save_in_place` staging append) instead of allocating a second copy of the whole file; the buffered `Vec` API stays, byte-identical (differential tests against the previous writer, qpdf-checked, 200 MB ignored memory test, fault-injected staging). Engine save paths unchanged and green.
