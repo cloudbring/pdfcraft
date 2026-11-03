@@ -544,6 +544,25 @@ mod tests {
         matches!(e, FilterError::Spent)
     }
 
+    #[test]
+    fn bomb_output_boundaries_are_unchanged() {
+        let size = 16 << 20;
+        let compressed = encode_flate(&vec![0; size]);
+        let chain = [(Filter::Flate, Params::default())];
+        for limit in [0, 1 << 20, size - 1] {
+            assert!(matches!(decode(&chain, &compressed, limit), Err(FilterError::LimitExceeded(_))));
+            assert!(matches!(decode_tolerant(&chain, &compressed, limit), Err(FilterError::LimitExceeded(_))));
+        }
+        assert_eq!(decode(&chain, &compressed, size).unwrap().len(), size);
+        assert_eq!(decode_tolerant(&chain, &compressed, size).unwrap().0.len(), size);
+
+        let inner = encode_flate(&vec![0; 32 << 20]);
+        let bomb = encode_flate(&inner);
+        let chain = [(Filter::Flate, Params::default()), (Filter::Flate, Params::default())];
+        assert!(matches!(decode(&chain, &bomb, 1 << 20), Err(FilterError::LimitExceeded(_))));
+        assert!(matches!(decode_tolerant(&chain, &bomb, 1 << 20), Err(FilterError::LimitExceeded(_))));
+    }
+
     /// A chain pays for what it reads and what each stage decodes, down to the byte: Flate inflates
     /// hex that ASCIIHex halves, so a stage counts when a later one shrinks it.
     #[test]
