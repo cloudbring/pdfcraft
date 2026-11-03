@@ -1,0 +1,23 @@
+Usage: cargo xtask <command> [args]
+
+Commands:
+  version      Print the workspace version, or `version set X.Y.Z[-pre]` to change it and refresh Cargo.lock
+  layers       Enforce the crate dependency layering (plan/architecture.md §3)
+  wasm         cargo check --target wasm32-unknown-unknown for every crate below L8, in one call
+  deny         Dependency licences, bans, sources and advisories (deny.toml; needs cargo-deny)
+  ci           fmt --check, clippy -D warnings, the CLI without default features, test, i18n-report, layers, wasm, license-check, deny, parity (stops at first failure)
+  test         Workspace tests: cargo nextest (cargo test when it is missing), then doctests
+  i18n-report  Print the strings each interface language lacks (counts and a few keys); never fails
+  license-check Offline source licence documents, attribution and metadata
+  assets       Enforce the asset policy (AGENTS.md §1) against ATTRIBUTION.toml; --write regenerates ATTRIBUTION.md
+  corpus       Fetch the pinned pdf.js test corpus into corpus/ (git-ignored) and verify it; --update-pin re-records the pin
+  check        Robustness sweep over corpus/ with pdfcraft-cli; fails on crashes or regressions vs xtask/baselines
+  fuzz         Mutation fuzzing of open/render/edit/save in child processes; findings in fuzz-out/ (--time 300)
+  parity       Validate parity/acrobat-features.toml against the registry, tools and tests; report progress (--json, --partial)
+  macos-integration Report macOS bundle, Quick Look, Spotlight and PDF integration diagnostics without mutating system state
+  text-oracle  Compare text extraction with pdftotext over corpus/ (word F1; target median ≥ 0.97)
+  render-oracle Compare page rendering with Poppler over corpus/ (pixel disagreement rate; --dir, --dpi, --limit, --tolerance, --hide-annotations)
+  screenshots  Regenerate the README screenshots in docs/images/ and their ATTRIBUTION entries
+  models       Fetch the OCR models (ATTRIBUTION.toml kind = "model") into assets/models/, verified by SHA-256
+  demo-pdf     Build dist/demo/pdfcraft-showcase.pdf (needs Google Chrome or Chromium)
+  help         Show this list

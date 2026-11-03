@@ -1,0 +1,26 @@
+parity: 847 features (824 counted; 23 na)
+
+  tier  features  shipped  partial  shipped%  weighted%
+  P0         252      228       21     90.5%      94.6%
+  P1         330      186       62     56.4%      65.8%
+  P2         198       37       22     18.7%      24.2%
+  P3          44        1        1      2.3%       3.4%
+  all        824      452      106     54.9%      61.3%
+
+  area                                features  shipped  partial  weighted%
+  A Core model and fidelity                 59       45        2      78.0%
+  B Viewing and navigation                  95       54       15      64.7%
+  C Content editing                         63       32       12      60.3%
+  D Organize pages                          78       53        5      71.2%
+  E Comments and review                     69       51        9      80.4%
+  F Forms and JavaScript                    79       59        9      80.4%
+  G Protect, redact, sanitize               42       24        2      59.5%
+  H Digital signatures                      45       23       10      62.2%
+  I Scan and OCR                            26        5        7      32.7%
+  J Create and export                       35       12        5      41.4%
+  K Optimize and standards                  58       17       11      38.8%
+  L Print and print production              39       17        0      43.6%
+  M Accessibility                           61       39       10      72.1%
+  N Compare, automation, AI, misc           75       21        9      34.0%
+
+note: 100 shipped feature(s) have no automation tool yet (AGENTS.md §3): core.malformed-input-safety, core.xref-streams, core.stream-filters, core.decompression-limits, core.unicode-passwords, core.permissions-enforced, core.crypt-filters, core.unencrypted-metadata, core.unsupported-handlers, core.copy-on-write-fidelity, core.write-validity, core.undo-labels, core.atomic-batch-edits, core.autosave, core.crash-recovery, core.encrypted-autosave, core.dirty-indicator, core.close-all, core.revert, core.reload-changed-files, core.drag-drop-open, core.recent-files, core.reopen-last-session, core.restore-last-view, view.render-annotation-appearances, view.render-error-isolation, view.render-priority, view.layout-continuous, view.layout-single-page, view.layout-two-up, view.layout-two-up-scrolling, view.cover-page, view.zoom-in-out, view.zoom-to-percent, view.zoom-actual-size, view.zoom-fit-page, view.zoom-fit-width, view.zoom-fit-height, view.zoom-fit-visible, view.marquee-zoom, view.hand-tool, view.rotate-view, view.read-mode, view.full-screen, view.page-navigation, view.goto-page-label, view.view-history, view.annotation-hover, view.page-size-hover, view.thumbnails-panel, view.thumbnail-context-ops, view.find-next-previous, view.find-options, view.text-select, view.select-all, view.theme-light-dark, view.theme-system, view.home-view, view.all-tools, view.command-palette, view.keyboard-shortcuts, view.shortcuts-dialog, view.menus-from-registry, view.about-dialog, view.restriction-notice, view.large-document-performance, edit.action-show-hide-field, organize.organize-grid, organize.multi-select-pages, organize.drag-reorder, organize.thumbnail-size, organize.preserve-links-dests, organize.preserve-fields, organize.preserve-layers, organize.preserve-inherited, organize.preserve-attachments, organize.bookmark-expand-collapse, comment.eraser, comment.default-properties, comment.keep-tool-selected, comment.move-preview, comment.copy-comment-text, form.highlight-fields, form.field-appearance-display, form.field-navigation, form.duplicate-fields, form.preview-form, protect.password-strength, sign.export-certificate, sign.validation-banner, sign.view-signed-version, create.from-clipboard, print.print-preview, print.print-pages-from-thumbnails, misc.compare-side-by-side, misc.disabled-command-reasons, misc.cli-run, misc.automation-root-confinement, misc.ui-control-channel, misc.ui-screenshots

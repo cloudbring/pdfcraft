@@ -17,8 +17,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
+pub use craft_hash::sha256_hex;
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 
 /// Licences allowed by AGENTS.md §1.2 (SPDX identifiers).
 pub const ALLOWED_LICENCES: &[&str] = &[
@@ -161,13 +161,6 @@ pub fn load(root: &Path) -> Result<Manifest> {
     toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
 }
 
-pub fn sha256_hex(bytes: &[u8]) -> String {
-    Sha256::digest(bytes).iter().fold(String::with_capacity(64), |mut s, b| {
-        let _ = write!(s, "{b:02x}");
-        s
-    })
-}
-
 /// `cargo xtask assets [--write]`.
 pub fn run(args: &[String]) -> Result<()> {
     let root = root();
@@ -276,12 +269,12 @@ pub fn check(root: &Path, m: &Manifest, repo_files: &[String], lock: &BTreeSet<(
             problems.push(format!("{}: adobe_data is only allowed for the closed list in AGENTS.md §1.1", a.path));
         }
         let catalog = a.is_translation_catalog();
-        match (std::fs::read(root.join(&a.path)), &a.sha256) {
+        match (craft_xtask::sha256_hex(&root.join(&a.path)), &a.sha256) {
             (Err(_), _) => problems.push(format!("{}: listed but missing", a.path)),
             // A leftover hash line (e.g. kept while resolving a rebase) is not checked; `run` notes it.
             (Ok(_), _) if catalog => {}
             (Ok(_), None) => problems.push(format!("{}: sha256 is missing (only translation catalogs go without one)", a.path)),
-            (Ok(bytes), Some(hash)) if sha256_hex(&bytes) == *hash => {}
+            (Ok(digest), Some(hash)) if digest == *hash => {}
             (Ok(_), Some(_)) => {
                 problems.push(format!("{}: SHA-256 does not match ATTRIBUTION.toml (re-verify provenance, then update the entry)", a.path))
             }
@@ -350,7 +343,7 @@ pub fn fetch_all(m: &Manifest, dir: &Path, kind: &str) -> Result<Vec<PathBuf>> {
 }
 
 fn fetch_verified(url: &str, path: &Path, sha256: &str) -> Result<()> {
-    if std::fs::read(path).is_ok_and(|b| sha256_hex(&b) == sha256) {
+    if craft_xtask::sha256_hex(path).is_ok_and(|b| b == sha256) {
         return Ok(());
     }
     println!("assets: fetching {url}");

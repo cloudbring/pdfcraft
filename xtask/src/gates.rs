@@ -6,7 +6,7 @@ use std::process::Command;
 
 use anyhow::{Context, anyhow, bail};
 
-use crate::layers;
+use crate::config;
 
 pub fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("xtask has a parent dir").to_path_buf()
@@ -46,38 +46,23 @@ fn metadata() -> anyhow::Result<serde_json::Value> {
     Ok(serde_json::from_slice(&out.stdout)?)
 }
 
-pub fn layers(_: &[String]) -> anyhow::Result<()> {
-    let crates = layers::from_metadata(&metadata()?).map_err(|e| anyhow!(e))?;
-    println!("Dependency layering (plan/architecture.md §3)\n");
-    println!("{:<24} {:<14} workspace deps", "crate", "layer");
-    for c in &crates {
-        let ws: Vec<String> = c
-            .deps
-            .iter()
-            .filter(|d| d.workspace)
-            .map(|d| format!("{}{}", layers::short_name(&d.name), if d.kind == layers::DepKind::Dev { " (dev)" } else { "" }))
-            .collect();
-        println!("{:<24} {:<14} {}", c.name, layers::describe(layers::classify(&c.name)), ws.join(", "));
-    }
-    let violations = layers::check(&crates);
-    println!();
-    if violations.is_empty() {
-        println!("OK: {} crates, no layering violations.", crates.len());
-        return Ok(());
-    }
-    for v in &violations {
-        println!("  - {v}");
-    }
-    bail!("{} layering violation(s)", violations.len())
+pub fn layers(args: &[String]) -> anyhow::Result<()> {
+    let policy = config::layers(&root());
+    let (text, result) = if args.is_empty() {
+        config::layer_report(&policy, &metadata()?).map_err(|e| anyhow!(e))?
+    } else {
+        let report =
+            craft_xtask::layers::compute(&policy, &craft_xtask::layers::Args::parse(args).map_err(|e| anyhow!(e))?).map_err(|e| anyhow!(e))?;
+        config::format_layer_report(&policy, &report)
+    };
+    print!("{text}");
+    result.map_err(|e| anyhow!(e))
 }
 
 pub fn wasm(_: &[String]) -> anyhow::Result<()> {
-    let crates = layers::from_metadata(&metadata()?).map_err(|e| anyhow!(e))?;
-    let set: Vec<String> = crates
-        .into_iter()
-        .filter(|c| matches!(layers::classify(&c.name), Some(layers::Class::Layer(_) | layers::Class::Standalone(_))))
-        .map(|c| c.name)
-        .collect();
+    let policy = config::layers(&root());
+    let crates = craft_xtask::layers::from_metadata(&metadata()?).map_err(|e| anyhow!(e))?;
+    let set: Vec<String> = crates.into_iter().filter(|c| config::wasm_safe(&policy, &c.name)).map(|c| c.name).collect();
     // One call over every crate: they share one dependency build, and `--keep-going` reports
     // each failing crate instead of stopping at the first.
     let mut c = cargo();

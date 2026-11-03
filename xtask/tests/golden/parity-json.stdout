@@ -1,0 +1,37 @@
+{
+  "errors": [],
+  "features": 847,
+  "tiers": {
+    "P0": {
+      "counted": 252,
+      "partial": 21,
+      "shipped": 228,
+      "shipped_pct": 90.47619047619048
+    },
+    "P1": {
+      "counted": 330,
+      "partial": 62,
+      "shipped": 186,
+      "shipped_pct": 56.36363636363637
+    },
+    "P2": {
+      "counted": 198,
+      "partial": 22,
+      "shipped": 37,
+      "shipped_pct": 18.68686868686869
+    },
+    "P3": {
+      "counted": 44,
+      "partial": 1,
+      "shipped": 1,
+      "shipped_pct": 2.272727272727273
+    }
+  },
+  "total": {
+    "counted": 824,
+    "partial": 106,
+    "shipped": 452,
+    "shipped_pct": 54.85436893203884,
+    "weighted_pct": 61.286407766990294
+  }
+}

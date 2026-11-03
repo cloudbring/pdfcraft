@@ -3,16 +3,15 @@
 use std::process::ExitCode;
 
 mod assets;
+mod config;
 mod corpus;
 mod demo_pdf;
 mod fuzz;
 mod gates;
-mod layers;
 mod license_check;
 mod macos_integration;
 mod parity;
 mod screenshots;
-mod version;
 
 type Command = fn(&[String]) -> anyhow::Result<()>;
 
@@ -52,8 +51,7 @@ const COMMANDS: &[(&str, &str, Command)] = &[
 ];
 
 fn version_cmd(args: &[String]) -> anyhow::Result<()> {
-    let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    version::run(&gates::root(), &args).map_err(anyhow::Error::msg)
+    craft_xtask::version::run(&config::version(&gates::root()), args).map_err(anyhow::Error::msg)
 }
 
 fn main() -> ExitCode {
@@ -86,4 +84,8 @@ fn print_help() {
         eprintln!("  {name:<12} {about}");
     }
     eprintln!("  {:<12} Show this list", "help");
+    eprintln!("\nShared task syntax:");
+    for help in [craft_xtask::version::cli_help(), craft_xtask::layers::cli_help()] {
+        eprintln!("  {help}");
+    }
 }

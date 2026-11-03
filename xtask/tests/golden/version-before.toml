@@ -1,0 +1,16 @@
+[workspace]
+members = []
+
+[workspace.package]
+version = "0.18.0"
+edition = "2024"
+
+[workspace.dependencies]
+own = { path = "crates/own", version = "0.18.0" }
+dep = { version = "0.18.0" }
+other = { path = "crates/other", version = "0.2" }
+
+[package]
+name = "version-fixture"
+version.workspace = true
+edition.workspace = true

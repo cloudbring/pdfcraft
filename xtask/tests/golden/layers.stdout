@@ -1,0 +1,42 @@
+Dependency layering (plan/architecture.md §3)
+
+crate                    layer          workspace deps
+pdfcraft                 exempt         engine, ui-egui
+pdfcraft-a11y            L4             content, cos, filters, fonts, model
+pdfcraft-annot           L3             cos, fonts, model
+pdfcraft-audit           L4             content, cos, edit, model
+pdfcraft-automation      L7             cos, engine, organize, platform, render, fonts (dev), model (dev), xfa (dev)
+pdfcraft-cli             exempt         audit, automation, cos, engine, platform, preflight, render
+pdfcraft-compare         L4             
+pdfcraft-content         L2             cos
+pdfcraft-cos             L1 standalone  crypt, filters, oracle (dev), testkit (dev)
+pdfcraft-create          L4             cos, filters, fonts, model, xfa, filters (dev)
+pdfcraft-crypt           L0 standalone  
+pdfcraft-edit            L4             annot, content, cos, fonts, model, render (dev)
+pdfcraft-engine          L6             a11y, annot, audit, compare, content, cos, create, edit, export, fonts, forms, geom, js, measure, model, ocr, optimize, organize, preflight, print, redact, render, sign, xfa, xfdf, filters (dev), testkit (dev)
+pdfcraft-export          L4             
+pdfcraft-filters         L0 standalone  
+pdfcraft-fonts           L2             cos
+pdfcraft-forms           L3             content, cos, fonts, model
+pdfcraft-geom            L0 standalone  
+pdfcraft-js              L3             
+pdfcraft-measure         L4             annot, content, cos, model, testkit (dev)
+pdfcraft-model           L2             cos
+pdfcraft-ocr             L4             fonts
+pdfcraft-optimize        L4             annot, content, cos, filters, model, render (dev)
+pdfcraft-oracle          test support   
+pdfcraft-organize        L4             content, cos, oracle (dev)
+pdfcraft-platform        L7             
+pdfcraft-preflight       L4             content, cos, model
+pdfcraft-print           L4             content, cos, model, render (dev)
+pdfcraft-redact          L4             annot, content, cos, edit, filters, fonts, forms, model, xfa, testkit (dev)
+pdfcraft-render          L3             cos, fonts
+pdfcraft-sign            L4             annot, cos, fonts, model
+pdfcraft-testkit         test support   
+pdfcraft-ui-egui         L7             content, cos, engine, fonts, model, platform, render, xfa (dev)
+pdfcraft-web             exempt         ui-egui
+pdfcraft-xfa             L3             cos, fonts
+pdfcraft-xfdf            L4             annot, cos, forms, model
+xtask                    exempt         cos, oracle
+
+OK: 37 crates, no layering violations.
