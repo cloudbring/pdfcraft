@@ -1,9 +1,11 @@
 //! pdfcraft-compare — Compare files: text differences (L4).
 //!
 //! Both documents' words (in reading order, with page and box) are diffed with Myers'
-//! O((N+M)·D) algorithm after the common prefix and suffix are set aside; the edit script is
-//! grouped into [`Change`]s — inserted, deleted or replaced runs of words — each with the
-//! rectangles to highlight on the old and new pages.
+//! O((N+M)·D) algorithm after the common prefix and suffix are set aside; segments too large
+//! for that are split at patience anchors (words unique on both sides) and, where nothing is
+//! unique because the vocabulary repeats, at the longest common run of repeated words (#54).
+//! The edit script is grouped into [`Change`]s — inserted, deleted or replaced runs of words
+//! — each with the rectangles to highlight on the old and new pages.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
@@ -82,8 +84,12 @@ enum Op {
 }
 
 /// Segments longer than this (old + new words) are first split at anchors, so Myers' saved
-/// frontiers (O(D²) memory) stay small.
+/// frontiers (O(D²) memory) stay small: the cost budget a gap must fit to be diffed directly.
 const DIRECT: usize = 3000;
+
+/// How many times a segment may be split at anchors before what is left is declared replaced:
+/// the deterministic fallback that bounds the work on adversarial inputs.
+const MAX_DEPTH: usize = 8;
 
 /// The edit script for `a` → `b`.
 fn diff(a: &[u64], b: &[u64], out: &mut Vec<Op>, depth: usize) {
@@ -95,13 +101,19 @@ fn diff(a: &[u64], b: &[u64], out: &mut Vec<Op>, depth: usize) {
     if ma.len() + mb.len() <= DIRECT {
         out.extend(myers(ma, mb));
     } else {
-        let anchors = if depth > 8 { Vec::new() } else { anchors(ma, mb) };
-        if anchors.is_empty() {
-            // A long stretch with nothing in common: one replacement.
+        let mut split = Vec::new();
+        if depth <= MAX_DEPTH {
+            split = anchors(ma, mb);
+            if split.is_empty() {
+                split = histogram_anchors(ma, mb);
+            }
+        }
+        if split.is_empty() {
+            // A long stretch with nothing in common, or beyond the depth budget: one replacement.
             replace(out);
         } else {
             let (mut i, mut j) = (0, 0);
-            for (x, y) in anchors {
+            for (x, y) in split {
                 diff(&ma[i..x], &mb[j..y], out, depth + 1);
                 out.push(Op::Equal);
                 i = x + 1;
@@ -153,6 +165,92 @@ fn anchors(a: &[u64], b: &[u64]) -> Vec<(usize, usize)> {
     }
     out.reverse();
     out
+}
+
+/// Histogram anchors (#54) for a segment patience cannot split because no word is unique:
+/// the longest common run of repeated words becomes the anchor — repetition makes such runs
+/// long, and their length pins them in place where single occurrences could be displaced —
+/// so stretches of boilerplate, tables and legal text still match instead of collapsing into
+/// one replacement. One pair per word of the run; empty when the sides share no word.
+fn histogram_anchors(a: &[u64], b: &[u64]) -> Vec<(usize, usize)> {
+    let Some((i, j, len)) = longest_common_run(a, b) else { return Vec::new() };
+    (0..len).map(|k| (i + k, j + k)).collect()
+}
+
+/// The longest run of words common to `a` and `b`: `(start in a, start in b, length)`, or
+/// `None` when they share no word. The length is binary-searched with a rolling hash of the
+/// word hashes, and every candidate is verified by comparing the words, so a hash
+/// coincidence cannot fake a run. Candidates scan from the middle outwards, and of the
+/// occurrences that share a candidate's hash the one closest to it is taken, so a run stays
+/// in place instead of landing on a displaced repetition; both keep the two sides of a
+/// split balanced and the recursion depth near logarithmic.
+fn longest_common_run(a: &[u64], b: &[u64]) -> Option<(usize, usize, usize)> {
+    use std::collections::HashMap;
+    const B: u64 = 0x9E37_79B9_7F4A_7C15;
+    let check = |len: usize| -> Option<(usize, usize, usize)> {
+        if len == 0 || len > a.len() || len > b.len() {
+            return None;
+        }
+        let top = B.wrapping_pow(len as u32 - 1);
+        let roll = |h: u64, out: u64, inn: u64| h.wrapping_sub(out.wrapping_mul(top)).wrapping_mul(B).wrapping_add(inn);
+        let mut windows: HashMap<u64, Vec<usize>> = HashMap::with_capacity(a.len() - len + 1);
+        let mut hash = 0u64;
+        for &w in &a[..len] {
+            hash = hash.wrapping_mul(B).wrapping_add(w);
+        }
+        for i in 0..a.len() - len + 1 {
+            windows.entry(hash).or_default().push(i);
+            if i < a.len() - len {
+                hash = roll(hash, a[i], a[i + len]);
+            }
+        }
+        let last = b.len() - len;
+        let mut hs: Vec<u64> = Vec::with_capacity(last + 1);
+        let mut hash = 0u64;
+        for &w in &b[..len] {
+            hash = hash.wrapping_mul(B).wrapping_add(w);
+        }
+        for j in 0..last {
+            hs.push(hash);
+            hash = roll(hash, b[j], b[j + len]);
+        }
+        hs.push(hash);
+        let mid = last / 2;
+        let mut order: Vec<usize> = Vec::with_capacity(last + 1);
+        order.push(mid);
+        for m in 1..=mid.max(last - mid) {
+            if mid >= m {
+                order.push(mid - m);
+            }
+            if mid + m <= last {
+                order.push(mid + m);
+            }
+        }
+        for j in order {
+            let Some(at) = windows.get(&hs[j]) else { continue };
+            // The closest occurrence first: a displaced repetition of the run must not
+            // steal the anchor, and the first match ends the verification early.
+            let mut at = at.clone();
+            at.sort_unstable_by_key(|&i| (i.abs_diff(j), i));
+            if let Some(i) = at.into_iter().find(|&i| a[i..i + len] == b[j..j + len]) {
+                return Some((i, j, len));
+            }
+        }
+        None
+    };
+    let mut best = None;
+    let (mut lo, mut hi) = (1usize, a.len().min(b.len()));
+    while lo <= hi {
+        let len = lo + (hi - lo) / 2;
+        match check(len) {
+            Some(found) => {
+                best = Some(found);
+                lo = len + 1;
+            }
+            None => hi = len - 1,
+        }
+    }
+    best
 }
 
 /// Myers' diff of `a` and `b`: the edit script.
@@ -394,6 +492,100 @@ mod tests {
         let c = compare(&old, &new);
         assert_eq!(c.changes.len(), 1);
         assert_eq!(c.changes[0].kind, Kind::Replaced);
+    }
+
+    /// The diff-quality metric of #54: how many words the report flags as changed.
+    fn changed_words(c: &Comparison) -> usize {
+        c.changes.iter().map(|ch| ch.old.text.split_whitespace().count() + ch.new.text.split_whitespace().count()).sum()
+    }
+
+    #[test]
+    fn repetitive_vocabulary_keeps_scattered_edits() {
+        // #54: 10,000 words over a 50-word vocabulary, 20 scattered replacements. No word is
+        // unique in either document, so patience has no anchor and the whole middle used to
+        // collapse into one replacement.
+        let vocab: Vec<String> = (0..50).map(|i| format!("term{i}")).collect();
+        let old: Vec<Word> = (0..10_000).map(|i| Word { text: vocab[i % 50].clone(), page: 0, rect: [0.0; 4] }).collect();
+        let mut new = old.clone();
+        for k in 0..20 {
+            let at = 199 + 487 * k;
+            new[at].text = vocab[(at + 7) % 50].clone();
+        }
+        let c = compare(&old, &new);
+        let changed = changed_words(&c);
+        eprintln!("10,000-word pair: {} changes, {changed} changed words", c.changes.len());
+        assert!(changed <= 40, "{} changes covering {} words", c.changes.len(), changed);
+        assert_eq!(c.count(Kind::Replaced), 20, "{:?}", c.changes.iter().map(|x| (&x.old.text, &x.new.text)).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn fixture_changed_word_counts_hold() {
+        // #54: the extra anchoring must not enlarge the diff on the existing fixtures.
+        let contract = "The contract starts on Monday. Payment is due within thirty days. Signed by both parties.";
+        let revised = "The contract starts on Tuesday. Payment is due within thirty days of invoice. Signed by both parties.";
+        let across_pages = |text: &[(&str, usize)]| text.iter().flat_map(|(t, p)| words(t, *p)).collect::<Vec<_>>();
+        let cases = [
+            ("identical", 0, words("the same words here", 0), words("the same words here", 0)),
+            (
+                "replacements",
+                6,
+                words("The quick brown fox jumps over the lazy dog", 0),
+                words("The quick red fox leaps over the very lazy dog today", 0),
+            ),
+            ("across pages", 2, across_pages(&[("alpha beta gamma", 0), ("delta epsilon", 1)]), across_pages(&[("alpha gamma", 0), ("delta", 1)])),
+            ("one line replaced", 6, words("a b c", 0), words("x y z", 0)),
+            ("contract", 6, words(contract, 0), words(revised, 0)),
+        ];
+        for (name, expected, old, new) in cases {
+            let changed = changed_words(&compare(&old, &new));
+            assert_eq!(changed, expected, "{name}: {changed} changed words");
+        }
+        // The two large fixtures, built as in their tests.
+        let text: Vec<String> = (0..20_000).map(|i| format!("w{i}")).collect();
+        let old: Vec<Word> = text.iter().map(|t| Word { text: t.clone(), page: 0, rect: [0.0; 4] }).collect();
+        let mut new = old.clone();
+        for k in [100usize, 5000, 12_000, 19_000] {
+            new[k].text = format!("changed{k}");
+        }
+        new.remove(8000);
+        assert_eq!(changed_words(&compare(&old, &new)), 9, "scattered edits");
+        let old: Vec<Word> = (0..30_000).map(|i| Word { text: format!("a{i}"), page: 0, rect: [0.0; 4] }).collect();
+        let new: Vec<Word> = (0..30_000).map(|i| Word { text: format!("b{i}"), page: 0, rect: [0.0; 4] }).collect();
+        assert_eq!(changed_words(&compare(&old, &new)), 60_000, "very different");
+    }
+
+    #[test]
+    fn fifty_thousand_word_pairs_stay_within_budget() {
+        // #54: the worst shapes at 50,000 words a side — repeated vocabulary with scattered
+        // edits (histogram anchors, then Myers per gap), a block swap of repeated words, and
+        // two documents with nothing in common — all finish inside the budget.
+        let start = std::time::Instant::now();
+        let vocab: Vec<String> = (0..50).map(|i| format!("w{i}")).collect();
+        let old: Vec<Word> = (0..50_000).map(|i| Word { text: vocab[i % 50].clone(), page: 0, rect: [0.0; 4] }).collect();
+        let mut new = old.clone();
+        for k in 0..100 {
+            let at = 101 + 431 * k;
+            new[at].text = vocab[(at + 11) % 50].clone();
+        }
+        let c = compare(&old, &new);
+        let changed = changed_words(&c);
+        eprintln!("50,000-word pair: {} changes, {changed} changed words", c.changes.len());
+        assert!(changed <= 200, "{} changes covering {} words", c.changes.len(), changed);
+
+        let block = |first: &str, second: &str| {
+            (0..50_000).map(|i| Word { text: (if i < 25_000 { first } else { second }).into(), page: 0, rect: [0.0; 4] }).collect::<Vec<_>>()
+        };
+        let swapped = compare(&block("alpha", "beta"), &block("beta", "alpha"));
+        // A block swap of repeated words has no monotone matches beyond one half: 50,000.
+        assert_eq!(changed_words(&swapped), 50_000);
+
+        let old: Vec<Word> = (0..50_000).map(|i| Word { text: format!("x{i}"), page: 0, rect: [0.0; 4] }).collect();
+        let new: Vec<Word> = (0..50_000).map(|i| Word { text: format!("y{i}"), page: 0, rect: [0.0; 4] }).collect();
+        assert_eq!(compare(&old, &new).changes.len(), 1);
+
+        let elapsed = start.elapsed();
+        eprintln!("50,000-word pairs: {elapsed:?}");
+        assert!(elapsed < std::time::Duration::from_secs(30), "{elapsed:?}");
     }
 }
 
